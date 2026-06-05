@@ -59,7 +59,7 @@ AD_KEYWORDS = [
 ]
 
 SENT_HISTORY_FILE = "sent_proxies.json"
-MAX_PROXIES_PER_POST = 4
+MAX_PROXIES_PER_POST = 6
 
 
 class MTProtoSocksExtractor:

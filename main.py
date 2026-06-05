@@ -1,3 +1,7 @@
+
+
+فایل main.py 
+
 import requests
 import re
 import json
@@ -277,10 +281,17 @@ class TelegramSender:
         return {"inline_keyboard": kb}
 
     def create_caption(self, proxies: List[Tuple[str, str]]) -> str:
-        return """✅ پروکسی‌های جدید.
+    return """✅ پروکسی‌های جدید 💯
 👈 برای اتصال به پروکسی‌ها از دکمه‌های زیر استفاده کنید.
 ➖➖➖➖➖➖➖➖
-<blockquote>@hamedproxy71</blockquote>
+@hamedproxy71
+➖➖➖➖➖➖➖➖
+<blockquote>کانال اصلی ما : @hamedvpns 👉👉
+</blockquote>
+<blockquote>لینک گروه ما : @hamedgrp 👉👉
+</blockquote>
+<blockquote>اسپانسر : @aristapnel 👉👉
+</blockquote>
 ➖➖➖➖➖➖➖➖
 #پروکسی #proxy #MTProto #SOCKS5"""
 

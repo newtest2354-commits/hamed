@@ -1,3 +1,4 @@
+# main.py/hamed
 import requests
 import re
 import json
@@ -34,7 +35,8 @@ CHANNELS = [
     "https://t.me/s/iRoProxy",
     "https://t.me/s/IPCF_Proxy",
     "https://t.me/s/proxy_bolt",
-    "https://t.me/s/proxyskyy"
+    "https://t.me/s/proxyskyy",
+    "https://t.me/s/ProxySkull"
 ]
 
 IPV4 = r'(?:25[0-5]|2[0-4]\d|1?\d?\d)'
@@ -280,7 +282,7 @@ class TelegramSender:
         return """✅ پروکسی‌های جدید 💯
 👈 برای اتصال به پروکسی‌ها از دکمه‌های زیر استفاده کنید.
 ➖➖➖➖➖➖➖➖
-@hamedproxy71
+🚀 @hamedproxy1 🚀
 ➖➖➖➖➖➖➖➖
 <blockquote>کانال اصلی ما : @hamedvpns 👉👉
 </blockquote>

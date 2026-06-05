@@ -1,7 +1,3 @@
-
-
-فایل main.py 
-
 import requests
 import re
 import json
@@ -281,7 +277,7 @@ class TelegramSender:
         return {"inline_keyboard": kb}
 
     def create_caption(self, proxies: List[Tuple[str, str]]) -> str:
-    return """✅ پروکسی‌های جدید 💯
+        return """✅ پروکسی‌های جدید 💯
 👈 برای اتصال به پروکسی‌ها از دکمه‌های زیر استفاده کنید.
 ➖➖➖➖➖➖➖➖
 @hamedproxy71

@@ -288,7 +288,7 @@ class TelegramSender:
 </blockquote>
 <blockquote>لینک گروه ما : @hamedgrp 👉👉
 </blockquote>
-<blockquote>اسپانسر : @aristapnel 👉👉
+<blockquote>اسپانسر : @aristapanel 👉👉
 </blockquote>
 ➖➖➖➖➖➖➖➖
 #پروکسی #proxy #MTProto #SOCKS5"""

@@ -59,7 +59,7 @@ AD_KEYWORDS = [
     'telegram.me/join', 't.me/join', 'click', 'لینک عضویت'
 ]
 
-MAX_PROXIES_PER_POST = 20
+MAX_PROXIES_PER_POST = 6
 MAX_MESSAGES_PER_CHANNEL = 3
 KEEP_HOURS = 168
 DB_PATH = "sent_proxies.db"

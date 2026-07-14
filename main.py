@@ -59,16 +59,14 @@ AD_KEYWORDS = [
     'telegram.me/join', 't.me/join', 'click', 'لینک عضویت'
 ]
 
-# تنظیمات جدید
 MAX_PROXIES_PER_POST = 20
 MAX_MESSAGES_PER_CHANNEL = 3
-KEEP_HOURS = 168  # 7 روز
+KEEP_HOURS = 168
 DB_PATH = "sent_proxies.db"
 CLEANUP_INTERVAL_HOURS = 24
 
 
 def init_db():
-    """ایجاد و راه‌اندازی دیتابیس"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -102,7 +100,6 @@ def init_db():
 
 
 def clean_old_proxies():
-    """پاکسازی پروکسی‌های قدیمی"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     cutoff = datetime.now() - timedelta(hours=KEEP_HOURS)
@@ -116,7 +113,6 @@ def clean_old_proxies():
 
 
 def clean_dead_cache():
-    """پاکسازی کش کانال‌های مرده"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     cutoff = datetime.now() - timedelta(hours=CLEANUP_INTERVAL_HOURS)
@@ -130,7 +126,6 @@ def clean_dead_cache():
 
 
 def get_sent_proxy_hashes() -> Set[str]:
-    """دریافت هش‌های پروکسی‌های ارسال شده"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT proxy_hash FROM sent_proxies")
@@ -142,7 +137,6 @@ def get_sent_proxy_hashes() -> Set[str]:
 
 
 def mark_as_sent_batch(proxies: List[str]):
-    """ثبت دسته‌ای پروکسی‌های ارسال شده"""
     if not proxies:
         return
     conn = sqlite3.connect(DB_PATH)
@@ -156,7 +150,6 @@ def mark_as_sent_batch(proxies: List[str]):
 
 
 def add_to_dead_cache(url: str):
-    """افزودن کانال به کش مرده"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO dead_cache (url, failed_at) VALUES (?, ?)",
@@ -166,7 +159,6 @@ def add_to_dead_cache(url: str):
 
 
 def remove_from_dead_cache(url: str):
-    """حذف کانال از کش مرده"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("DELETE FROM dead_cache WHERE url = ?", (url,))
@@ -175,7 +167,6 @@ def remove_from_dead_cache(url: str):
 
 
 def log_cleanup(deleted_count: int):
-    """ثبت لاگ پاکسازی"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO cleanup_log (deleted_count) VALUES (?)", (deleted_count,))
@@ -192,16 +183,13 @@ class MTProtoSocksExtractor:
             'Accept-Language': 'en-US,en;q=0.5',
         })
         
-        # بارگذاری دیتا از دیتابیس
         self.sent_hashes = get_sent_proxy_hashes()
         self.dead_cache = self.load_dead_cache()
         self.failed_counter = {}
         
-        # پاکسازی خودکار
         self.auto_cleanup()
 
     def load_dead_cache(self) -> Set[str]:
-        """بارگذاری کش کانال‌های مرده"""
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("SELECT url FROM dead_cache")
@@ -210,24 +198,18 @@ class MTProtoSocksExtractor:
         return {row[0] for row in rows}
 
     def auto_cleanup(self):
-        """پاکسازی خودکار"""
-        # پاکسازی پروکسی‌های قدیمی
         deleted = clean_old_proxies()
         if deleted:
             log_cleanup(deleted)
         
-        # پاکسازی کش کانال‌های مرده
         clean_dead_cache()
         
-        # بروزرسانی کش در حافظه
         self.dead_cache = self.load_dead_cache()
 
     def should_skip_channel(self, url: str) -> bool:
-        """بررسی اینکه کانال باید رد شود یا خیر"""
         return url in self.dead_cache
 
     def update_dead_cache(self, url: str):
-        """بروزرسانی کش کانال‌های مرده"""
         self.failed_counter[url] = self.failed_counter.get(url, 0) + 1
         if self.failed_counter[url] >= 3:
             add_to_dead_cache(url)
@@ -235,12 +217,10 @@ class MTProtoSocksExtractor:
             logger.info(f"Channel {url} added to dead cache after 3 failures")
 
     def is_proxy_already_sent(self, proxy: str) -> bool:
-        """بررسی ارسال قبلی پروکسی"""
         proxy_hash = hashlib.md5(proxy.encode()).hexdigest()
         return proxy_hash in self.sent_hashes
 
     def has_ad_keywords(self, text: str) -> bool:
-        """بررسی وجود کلمات تبلیغاتی"""
         t = text.lower()
         for k in AD_KEYWORDS:
             if k in t:
@@ -248,14 +228,12 @@ class MTProtoSocksExtractor:
         return False
 
     def extract_from_text(self, text: str) -> List[str]:
-        """استخراج پروکسی از متن"""
         out = []
         for p in PROXY_PATTERNS:
             out += re.findall(p, text, re.IGNORECASE)
         return list(set(out))
 
     def extract_proxy_buttons(self, soup) -> List[str]:
-        """استخراج پروکسی از دکمه‌ها"""
         proxies = []
         buttons = soup.find_all("a", href=True)
         for btn in buttons:
@@ -277,7 +255,6 @@ class MTProtoSocksExtractor:
         return list(set(proxies))
 
     def normalize_proxy(self, proxy: str) -> str:
-        """نرمال‌سازی فرمت پروکسی"""
         proxy = proxy.strip()
         if proxy.startswith('https://t.me/proxy?'):
             proxy = proxy.replace('https://t.me/proxy?', 'tg://proxy?')
@@ -296,16 +273,15 @@ class MTProtoSocksExtractor:
         return proxy
 
     def fetch_page(self, url: str) -> Optional[str]:
-        """دریافت صفحه"""
         try:
-            r = self.session.get(url, timeout=20)
+            telegram_url = url.replace('t.me', 'telegram.me')
+            r = self.session.get(telegram_url, timeout=20)
             return r.text
         except Exception as e:
             logger.error(f"Failed to fetch {url}: {e}")
             return None
 
     def extract_proxies_from_channel(self, url: str) -> List[str]:
-        """استخراج پروکسی از کانال"""
         if self.should_skip_channel(url):
             logger.info(f"Skipping {url} (in dead cache)")
             return []
@@ -317,7 +293,6 @@ class MTProtoSocksExtractor:
         
         try:
             soup = BeautifulSoup(html, 'html.parser')
-            # فقط تعداد محدودی پیام آخر رو چک کن
             blocks = soup.find_all('div', class_='tgme_widget_message_text')[:MAX_MESSAGES_PER_CHANNEL]
             result = []
             
@@ -326,14 +301,12 @@ class MTProtoSocksExtractor:
                 if self.has_ad_keywords(text):
                     continue
                 
-                # استخراج از متن
                 found = self.extract_from_text(text)
                 for f in found:
                     n = self.normalize_proxy(f)
                     if not self.is_proxy_already_sent(n):
                         result.append(n)
                 
-                # استخراج از دکمه‌های داخل پیام
                 parent = msg.find_parent('div', class_='tgme_widget_message_wrap')
                 if parent:
                     buttons = parent.find_all('a', href=True)
@@ -354,12 +327,10 @@ class MTProtoSocksExtractor:
                             if not self.is_proxy_already_sent(n):
                                 result.append(n)
             
-            # موفقیت: ریست کردن شمارنده خطا
             self.failed_counter[url] = 0
             remove_from_dead_cache(url)
             self.dead_cache.discard(url)
             
-            # حذف تکراری‌ها
             unique_result = list(set(result))
             logger.info(f"Extracted {len(unique_result)} proxies from {url}")
             return unique_result
@@ -370,7 +341,6 @@ class MTProtoSocksExtractor:
             return []
 
     def collect_all_proxies(self) -> List[Tuple[str, str]]:
-        """جمع‌آوری تمام پروکسی‌ها"""
         allp = []
         seen = set()
         
@@ -379,7 +349,6 @@ class MTProtoSocksExtractor:
             for p in ps:
                 if p not in seen:
                     seen.add(p)
-                    # تشخیص نوع پروکسی
                     t = "MTProto" if "proxy" in p or "mtproto" in p.lower() else "SOCKS5"
                     allp.append((p, t))
         
@@ -393,7 +362,6 @@ class TelegramSender:
         self.chat_id = chat_id
 
     def send_message(self, text: str, reply_markup=None) -> bool:
-        """ارسال پیام"""
         try:
             data = {
                 "chat_id": self.chat_id,
@@ -413,11 +381,9 @@ class TelegramSender:
             return False
 
     def create_proxy_keyboard(self, proxies: List[Tuple[str, str]]) -> dict:
-        """ساخت کیبورد پروکسی با ۲ دکمه در هر ردیف"""
         kb = []
         row = []
         for i, (p, t) in enumerate(proxies):
-            # انتخاب آیکون مناسب
             if t == "MTProto":
                 label = "📡 MTProto"
             else:
@@ -428,7 +394,6 @@ class TelegramSender:
                 "url": p
             })
             
-            # هر ۲ دکمه یک ردیف
             if len(row) == 2 or i == len(proxies) - 1:
                 kb.append(row)
                 row = []
@@ -436,7 +401,6 @@ class TelegramSender:
         return {"inline_keyboard": kb}
 
     def create_caption(self, proxies: List[Tuple[str, str]]) -> str:
-        """ساخت کپشن پیام"""
         return """✅ پروکسی‌های جدید 💯
 👈 برای اتصال به پروکسی‌ها از دکمه‌های زیر استفاده کنید.
 ➖➖➖➖➖➖➖➖
@@ -452,7 +416,6 @@ class TelegramSender:
 #پروکسی #proxy #MTProto #SOCKS5"""
 
     def send_proxies_batch(self, proxies: List[Tuple[str, str]]) -> bool:
-        """ارسال دسته‌ای پروکسی‌ها"""
         if not proxies:
             return False
         return self.send_message(self.create_caption(proxies), self.create_proxy_keyboard(proxies))
@@ -460,10 +423,8 @@ class TelegramSender:
 
 class ProxyScheduler:
     def __init__(self):
-        # راه‌اندازی دیتابیس
         init_db()
         
-        # پاکسازی اولیه
         clean_old_proxies()
         clean_dead_cache()
         
@@ -481,7 +442,6 @@ class ProxyScheduler:
             for i in range(0, len(proxies), MAX_PROXIES_PER_POST):
                 batch = proxies[i:i + MAX_PROXIES_PER_POST]
                 if self.sender.send_proxies_batch(batch):
-                    # جمع‌آوری پروکسی‌های ارسال شده
                     for p, _ in batch:
                         sent_in_run.append(p)
                     logger.info(f"✅ Sent batch {i//MAX_PROXIES_PER_POST + 1}/{(len(proxies)-1)//MAX_PROXIES_PER_POST + 1}")
@@ -489,10 +449,8 @@ class ProxyScheduler:
                     logger.error(f"❌ Failed to send batch {i//MAX_PROXIES_PER_POST + 1}")
                 await asyncio.sleep(1)
             
-            # ثبت پروکسی‌های ارسال شده در دیتابیس
             if sent_in_run:
                 mark_as_sent_batch(sent_in_run)
-                # بروزرسانی کش در حافظه
                 for p in sent_in_run:
                     self.ext.sent_hashes.add(hashlib.md5(p.encode()).hexdigest())
         else:

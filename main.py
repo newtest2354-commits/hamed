@@ -6,10 +6,11 @@ import hashlib
 import time
 import os
 import asyncio
+import sqlite3
+import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Set, Tuple, Optional
 from urllib.parse import urlparse, parse_qs
-import logging
 from bs4 import BeautifulSoup
 
 logging.basicConfig(
@@ -58,9 +59,128 @@ AD_KEYWORDS = [
     'telegram.me/join', 't.me/join', 'click', 'لینک عضویت'
 ]
 
-SENT_HISTORY_FILE = "sent_proxies.json"
-MAX_PROXIES_PER_POST = 6
-CLEANUP_FILE = "last_cleanup.json"
+# تنظیمات جدید
+MAX_PROXIES_PER_POST = 20
+MAX_MESSAGES_PER_CHANNEL = 3
+KEEP_HOURS = 168  # 7 روز
+DB_PATH = "sent_proxies.db"
+CLEANUP_INTERVAL_HOURS = 24
+
+
+def init_db():
+    """ایجاد و راه‌اندازی دیتابیس"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS sent_proxies (
+            proxy_hash TEXT PRIMARY KEY,
+            proxy TEXT NOT NULL,
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_sent_at ON sent_proxies(sent_at)")
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS dead_cache (
+            url TEXT PRIMARY KEY,
+            failed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_failed_at ON dead_cache(failed_at)")
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS cleanup_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cleaned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            deleted_count INTEGER
+        )
+    """)
+    
+    conn.commit()
+    conn.close()
+    logger.info(f"Database initialized at {DB_PATH}")
+
+
+def clean_old_proxies():
+    """پاکسازی پروکسی‌های قدیمی"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    cutoff = datetime.now() - timedelta(hours=KEEP_HOURS)
+    c.execute("DELETE FROM sent_proxies WHERE sent_at < ?", (cutoff,))
+    deleted = c.rowcount
+    conn.commit()
+    conn.close()
+    if deleted:
+        logger.info(f"Cleaned {deleted} old proxies (older than {KEEP_HOURS} hours)")
+    return deleted
+
+
+def clean_dead_cache():
+    """پاکسازی کش کانال‌های مرده"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    cutoff = datetime.now() - timedelta(hours=CLEANUP_INTERVAL_HOURS)
+    c.execute("DELETE FROM dead_cache WHERE failed_at < ?", (cutoff,))
+    deleted = c.rowcount
+    conn.commit()
+    conn.close()
+    if deleted:
+        logger.info(f"Cleaned {deleted} old dead cache entries")
+    return deleted
+
+
+def get_sent_proxy_hashes() -> Set[str]:
+    """دریافت هش‌های پروکسی‌های ارسال شده"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT proxy_hash FROM sent_proxies")
+    rows = c.fetchall()
+    conn.close()
+    sent_count = len(rows)
+    logger.info(f"Loaded {sent_count} previously sent proxies from database")
+    return {row[0] for row in rows}
+
+
+def mark_as_sent_batch(proxies: List[str]):
+    """ثبت دسته‌ای پروکسی‌های ارسال شده"""
+    if not proxies:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    now = datetime.now()
+    data = [(hashlib.md5(p.encode()).hexdigest(), p, now) for p in proxies]
+    c.executemany("INSERT OR IGNORE INTO sent_proxies (proxy_hash, proxy, sent_at) VALUES (?, ?, ?)", data)
+    conn.commit()
+    conn.close()
+    logger.info(f"Marked {len(proxies)} proxies as sent.")
+
+
+def add_to_dead_cache(url: str):
+    """افزودن کانال به کش مرده"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO dead_cache (url, failed_at) VALUES (?, ?)",
+              (url, datetime.now()))
+    conn.commit()
+    conn.close()
+
+
+def remove_from_dead_cache(url: str):
+    """حذف کانال از کش مرده"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM dead_cache WHERE url = ?", (url,))
+    conn.commit()
+    conn.close()
+
+
+def log_cleanup(deleted_count: int):
+    """ثبت لاگ پاکسازی"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO cleanup_log (deleted_count) VALUES (?)", (deleted_count,))
+    conn.commit()
+    conn.close()
 
 
 class MTProtoSocksExtractor:
@@ -71,160 +191,56 @@ class MTProtoSocksExtractor:
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
             'Accept-Language': 'en-US,en;q=0.5',
         })
-        self.sent_proxies = self.load_sent_history()
-        self.cache_file = "dead_cache.json"
+        
+        # بارگذاری دیتا از دیتابیس
+        self.sent_hashes = get_sent_proxy_hashes()
         self.dead_cache = self.load_dead_cache()
         self.failed_counter = {}
-        self.last_cleanup = self.load_last_cleanup()
         
-        # انجام پاکسازی خودکار در شروع
+        # پاکسازی خودکار
         self.auto_cleanup()
 
-    def load_last_cleanup(self) -> datetime:
-        """بارگذاری زمان آخرین پاکسازی"""
-        try:
-            if os.path.exists(CLEANUP_FILE):
-                with open(CLEANUP_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    return datetime.fromisoformat(data.get("last_cleanup", "2000-01-01T00:00:00"))
-        except:
-            pass
-        return datetime(2000, 1, 1)
-    
-    def save_last_cleanup(self):
-        """ذخیره زمان پاکسازی"""
-        try:
-            with open(CLEANUP_FILE, 'w', encoding='utf-8') as f:
-                json.dump({"last_cleanup": datetime.now().isoformat()}, f)
-        except:
-            pass
-    
+    def load_dead_cache(self) -> Set[str]:
+        """بارگذاری کش کانال‌های مرده"""
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT url FROM dead_cache")
+        rows = c.fetchall()
+        conn.close()
+        return {row[0] for row in rows}
+
     def auto_cleanup(self):
-        """پاکسازی خودکار کش هر ۲۴ ساعت"""
-        now = datetime.now()
-        if now - self.last_cleanup >= timedelta(hours=24):
-            logger.info("🔄 Performing automatic cache cleanup...")
-            
-            # پاکسازی کش کانال‌های مرده
-            old_dead_count = len(self.dead_cache)
-            self.dead_cache.clear()
-            self.save_dead_cache()
-            
-            # پاکسازی کش پروکسی‌های ارسال شده
-            old_sent_count = len(self.sent_proxies)
-            self.sent_proxies.clear()
-            self.save_sent_history()
-            
-            # ریست شمارنده خطاها
-            self.failed_counter.clear()
-            
-            # ذخیره زمان پاکسازی
-            self.last_cleanup = now
-            self.save_last_cleanup()
-            
-            logger.info(f"✅ Cleaned {old_dead_count} dead channels and {old_sent_count} sent proxies")
-        else:
-            # اگر ۲۴ ساعت نگذشته، فقط کش‌های منقضی شده رو پاک کن
-            self.clean_expired_entries()
-    
-    def clean_expired_entries(self):
-        """پاک کردن آیتم‌های منقضی شده (بیشتر از ۲۴ ساعت)"""
-        now = datetime.now()
-        cleaned = False
+        """پاکسازی خودکار"""
+        # پاکسازی پروکسی‌های قدیمی
+        deleted = clean_old_proxies()
+        if deleted:
+            log_cleanup(deleted)
         
-        # پاک کردن کانال‌های منقضی
-        expired_channels = [url for url, dt in self.dead_cache.items() 
-                           if now - dt >= timedelta(hours=24)]
-        for url in expired_channels:
-            del self.dead_cache[url]
-        if expired_channels:
-            self.save_dead_cache()
-            logger.info(f"Removed {len(expired_channels)} expired channels")
-            cleaned = True
+        # پاکسازی کش کانال‌های مرده
+        clean_dead_cache()
         
-        # پاک کردن پروکسی‌های منقضی
-        expired_proxies = [h for h, dt in self.sent_proxies.items() 
-                          if now - dt >= timedelta(hours=24)]
-        for h in expired_proxies:
-            del self.sent_proxies[h]
-        if expired_proxies:
-            self.save_sent_history()
-            logger.info(f"Removed {len(expired_proxies)} expired proxies")
-            cleaned = True
-        
-        return cleaned
-
-    def load_sent_history(self) -> Dict:
-        if os.path.exists(SENT_HISTORY_FILE):
-            try:
-                with open(SENT_HISTORY_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    for k, v in data.items():
-                        data[k] = datetime.fromisoformat(v)
-                    return data
-            except:
-                return {}
-        return {}
-
-    def save_sent_history(self):
-        try:
-            with open(SENT_HISTORY_FILE, 'w', encoding='utf-8') as f:
-                json.dump({k: v.isoformat() for k, v in self.sent_proxies.items()}, f, ensure_ascii=False, indent=2)
-        except:
-            pass
-
-    def load_dead_cache(self) -> Dict:
-        if os.path.exists(self.cache_file):
-            try:
-                with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    for k, v in data.items():
-                        data[k] = datetime.fromisoformat(v)
-                    return data
-            except:
-                return {}
-        return {}
-
-    def save_dead_cache(self):
-        try:
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump({k: v.isoformat() for k, v in self.dead_cache.items()}, f, ensure_ascii=False, indent=2)
-        except:
-            pass
+        # بروزرسانی کش در حافظه
+        self.dead_cache = self.load_dead_cache()
 
     def should_skip_channel(self, url: str) -> bool:
-        if url in self.dead_cache:
-            if datetime.now() - self.dead_cache[url] < timedelta(hours=24):
-                return True
-            else:
-                del self.dead_cache[url]
-                self.save_dead_cache()
-        return False
+        """بررسی اینکه کانال باید رد شود یا خیر"""
+        return url in self.dead_cache
 
     def update_dead_cache(self, url: str):
-        """Update dead cache for failed channels"""
+        """بروزرسانی کش کانال‌های مرده"""
         self.failed_counter[url] = self.failed_counter.get(url, 0) + 1
         if self.failed_counter[url] >= 3:
-            self.dead_cache[url] = datetime.now()
-            self.save_dead_cache()
+            add_to_dead_cache(url)
+            self.dead_cache.add(url)
             logger.info(f"Channel {url} added to dead cache after 3 failures")
 
     def is_proxy_already_sent(self, proxy: str) -> bool:
-        h = hashlib.md5(proxy.encode()).hexdigest()
-        if h in self.sent_proxies:
-            if datetime.now() - self.sent_proxies[h] < timedelta(hours=24):
-                return True
-            else:
-                del self.sent_proxies[h]
-                self.save_sent_history()
-        return False
-
-    def mark_as_sent(self, proxy: str):
-        h = hashlib.md5(proxy.encode()).hexdigest()
-        self.sent_proxies[h] = datetime.now()
-        self.save_sent_history()
+        """بررسی ارسال قبلی پروکسی"""
+        proxy_hash = hashlib.md5(proxy.encode()).hexdigest()
+        return proxy_hash in self.sent_hashes
 
     def has_ad_keywords(self, text: str) -> bool:
+        """بررسی وجود کلمات تبلیغاتی"""
         t = text.lower()
         for k in AD_KEYWORDS:
             if k in t:
@@ -232,12 +248,14 @@ class MTProtoSocksExtractor:
         return False
 
     def extract_from_text(self, text: str) -> List[str]:
+        """استخراج پروکسی از متن"""
         out = []
         for p in PROXY_PATTERNS:
             out += re.findall(p, text, re.IGNORECASE)
         return list(set(out))
 
     def extract_proxy_buttons(self, soup) -> List[str]:
+        """استخراج پروکسی از دکمه‌ها"""
         proxies = []
         buttons = soup.find_all("a", href=True)
         for btn in buttons:
@@ -245,9 +263,7 @@ class MTProtoSocksExtractor:
             if not href:
                 continue
             href_lower = href.lower()
-            if "joinchat" in href_lower:
-                continue
-            if "/+" in href:
+            if "joinchat" in href_lower or "/+" in href:
                 continue
             if (
                 href.startswith("tg://proxy?")
@@ -261,11 +277,13 @@ class MTProtoSocksExtractor:
         return list(set(proxies))
 
     def normalize_proxy(self, proxy: str) -> str:
+        """نرمال‌سازی فرمت پروکسی"""
         proxy = proxy.strip()
         if proxy.startswith('https://t.me/proxy?'):
             proxy = proxy.replace('https://t.me/proxy?', 'tg://proxy?')
         elif proxy.startswith('https://t.me/socks?'):
             proxy = proxy.replace('https://t.me/socks?', 'tg://socks?')
+        
         if re.match(r'^\d{1,3}(\.\d{1,3}){3}:\d+:[a-fA-F0-9]+$', proxy):
             a, b, c = proxy.split(':')
             proxy = f"tg://proxy?server={a}&port={b}&secret={c}"
@@ -278,6 +296,7 @@ class MTProtoSocksExtractor:
         return proxy
 
     def fetch_page(self, url: str) -> Optional[str]:
+        """دریافت صفحه"""
         try:
             r = self.session.get(url, timeout=20)
             return r.text
@@ -286,6 +305,7 @@ class MTProtoSocksExtractor:
             return None
 
     def extract_proxies_from_channel(self, url: str) -> List[str]:
+        """استخراج پروکسی از کانال"""
         if self.should_skip_channel(url):
             logger.info(f"Skipping {url} (in dead cache)")
             return []
@@ -297,30 +317,52 @@ class MTProtoSocksExtractor:
         
         try:
             soup = BeautifulSoup(html, 'html.parser')
-            blocks = soup.find_all('div', class_='tgme_widget_message_text')
+            # فقط تعداد محدودی پیام آخر رو چک کن
+            blocks = soup.find_all('div', class_='tgme_widget_message_text')[:MAX_MESSAGES_PER_CHANNEL]
             result = []
             
-            # Extract from buttons
-            button_proxies = self.extract_proxy_buttons(soup)
-            for p in button_proxies:
-                if not self.is_proxy_already_sent(p):
-                    result.append(p)
-            
-            # Extract from text blocks
-            for b in blocks:
-                text = b.get_text()
+            for msg in blocks:
+                text = msg.get_text()
                 if self.has_ad_keywords(text):
                     continue
+                
+                # استخراج از متن
                 found = self.extract_from_text(text)
                 for f in found:
                     n = self.normalize_proxy(f)
                     if not self.is_proxy_already_sent(n):
                         result.append(n)
+                
+                # استخراج از دکمه‌های داخل پیام
+                parent = msg.find_parent('div', class_='tgme_widget_message_wrap')
+                if parent:
+                    buttons = parent.find_all('a', href=True)
+                    for btn in buttons:
+                        href = btn.get('href', '').strip()
+                        if not href:
+                            continue
+                        href_lower = href.lower()
+                        if "joinchat" in href_lower or "/+" in href_lower:
+                            continue
+                        if (href.startswith("tg://proxy?") or 
+                            href.startswith("tg://socks?") or 
+                            href.startswith("https://t.me/proxy?") or 
+                            href.startswith("https://t.me/socks?") or 
+                            href.startswith("mtproto://") or 
+                            href.startswith("socks5://")):
+                            n = self.normalize_proxy(href)
+                            if not self.is_proxy_already_sent(n):
+                                result.append(n)
             
-            # Reset failure counter on success
+            # موفقیت: ریست کردن شمارنده خطا
             self.failed_counter[url] = 0
-            logger.info(f"Extracted {len(result)} proxies from {url}")
-            return list(set(result))
+            remove_from_dead_cache(url)
+            self.dead_cache.discard(url)
+            
+            # حذف تکراری‌ها
+            unique_result = list(set(result))
+            logger.info(f"Extracted {len(unique_result)} proxies from {url}")
+            return unique_result
             
         except Exception as e:
             logger.error(f"Error parsing {url}: {e}")
@@ -328,23 +370,21 @@ class MTProtoSocksExtractor:
             return []
 
     def collect_all_proxies(self) -> List[Tuple[str, str]]:
+        """جمع‌آوری تمام پروکسی‌ها"""
         allp = []
+        seen = set()
+        
         for c in CHANNELS:
             ps = self.extract_proxies_from_channel(c)
             for p in ps:
-                t = "MTProto" if "proxy" in p else "SOCKS5"
-                allp.append((p, t))
+                if p not in seen:
+                    seen.add(p)
+                    # تشخیص نوع پروکسی
+                    t = "MTProto" if "proxy" in p or "mtproto" in p.lower() else "SOCKS5"
+                    allp.append((p, t))
         
-        # Remove duplicates while preserving order
-        seen = set()
-        unique = []
-        for p, t in allp:
-            if p not in seen:
-                seen.add(p)
-                unique.append((p, t))
-        
-        logger.info(f"Collected {len(unique)} unique proxies from all channels")
-        return unique
+        logger.info(f"Collected {len(allp)} unique proxies from all channels")
+        return allp
 
 
 class TelegramSender:
@@ -353,6 +393,7 @@ class TelegramSender:
         self.chat_id = chat_id
 
     def send_message(self, text: str, reply_markup=None) -> bool:
+        """ارسال پیام"""
         try:
             data = {
                 "chat_id": self.chat_id,
@@ -372,19 +413,30 @@ class TelegramSender:
             return False
 
     def create_proxy_keyboard(self, proxies: List[Tuple[str, str]]) -> dict:
+        """ساخت کیبورد پروکسی با ۲ دکمه در هر ردیف"""
         kb = []
         row = []
         for i, (p, t) in enumerate(proxies):
+            # انتخاب آیکون مناسب
+            if t == "MTProto":
+                label = "📡 MTProto"
+            else:
+                label = "🔒 SOCKS5"
+            
             row.append({
-                "text": f"📡 {t}" if t == "MTProto" else f"🔒 {t}",
+                "text": label,
                 "url": p
             })
+            
+            # هر ۲ دکمه یک ردیف
             if len(row) == 2 or i == len(proxies) - 1:
                 kb.append(row)
                 row = []
+        
         return {"inline_keyboard": kb}
 
     def create_caption(self, proxies: List[Tuple[str, str]]) -> str:
+        """ساخت کپشن پیام"""
         return """✅ پروکسی‌های جدید 💯
 👈 برای اتصال به پروکسی‌ها از دکمه‌های زیر استفاده کنید.
 ➖➖➖➖➖➖➖➖
@@ -400,6 +452,7 @@ class TelegramSender:
 #پروکسی #proxy #MTProto #SOCKS5"""
 
     def send_proxies_batch(self, proxies: List[Tuple[str, str]]) -> bool:
+        """ارسال دسته‌ای پروکسی‌ها"""
         if not proxies:
             return False
         return self.send_message(self.create_caption(proxies), self.create_proxy_keyboard(proxies))
@@ -407,26 +460,43 @@ class TelegramSender:
 
 class ProxyScheduler:
     def __init__(self):
+        # راه‌اندازی دیتابیس
+        init_db()
+        
+        # پاکسازی اولیه
+        clean_old_proxies()
+        clean_dead_cache()
+        
         self.ext = MTProtoSocksExtractor()
         self.sender = TelegramSender(BOT_TOKEN, CHANNEL_ID)
 
     async def run_once(self):
-        logger.info("Starting proxy collection...")
+        logger.info("🚀 Starting proxy collection...")
         proxies = self.ext.collect_all_proxies()
         
         if proxies:
-            logger.info(f"Sending {len(proxies)} proxies in batches of {MAX_PROXIES_PER_POST}")
+            logger.info(f"📤 Sending {len(proxies)} proxies in batches of {MAX_PROXIES_PER_POST}")
+            
+            sent_in_run = []
             for i in range(0, len(proxies), MAX_PROXIES_PER_POST):
                 batch = proxies[i:i + MAX_PROXIES_PER_POST]
                 if self.sender.send_proxies_batch(batch):
+                    # جمع‌آوری پروکسی‌های ارسال شده
                     for p, _ in batch:
-                        self.ext.mark_as_sent(p)
-                    logger.info(f"Sent batch {i//MAX_PROXIES_PER_POST + 1}/{(len(proxies)-1)//MAX_PROXIES_PER_POST + 1}")
+                        sent_in_run.append(p)
+                    logger.info(f"✅ Sent batch {i//MAX_PROXIES_PER_POST + 1}/{(len(proxies)-1)//MAX_PROXIES_PER_POST + 1}")
                 else:
-                    logger.error(f"Failed to send batch {i//MAX_PROXIES_PER_POST + 1}")
+                    logger.error(f"❌ Failed to send batch {i//MAX_PROXIES_PER_POST + 1}")
                 await asyncio.sleep(1)
+            
+            # ثبت پروکسی‌های ارسال شده در دیتابیس
+            if sent_in_run:
+                mark_as_sent_batch(sent_in_run)
+                # بروزرسانی کش در حافظه
+                for p in sent_in_run:
+                    self.ext.sent_hashes.add(hashlib.md5(p.encode()).hexdigest())
         else:
-            logger.info("No new proxies found")
+            logger.info("📭 No new proxies found")
 
 
 def main():

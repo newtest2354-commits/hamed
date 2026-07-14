@@ -60,6 +60,7 @@ AD_KEYWORDS = [
 
 SENT_HISTORY_FILE = "sent_proxies.json"
 MAX_PROXIES_PER_POST = 6
+CLEANUP_FILE = "last_cleanup.json"
 
 
 class MTProtoSocksExtractor:
@@ -74,6 +75,84 @@ class MTProtoSocksExtractor:
         self.cache_file = "dead_cache.json"
         self.dead_cache = self.load_dead_cache()
         self.failed_counter = {}
+        self.last_cleanup = self.load_last_cleanup()
+        
+        # انجام پاکسازی خودکار در شروع
+        self.auto_cleanup()
+
+    def load_last_cleanup(self) -> datetime:
+        """بارگذاری زمان آخرین پاکسازی"""
+        try:
+            if os.path.exists(CLEANUP_FILE):
+                with open(CLEANUP_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    return datetime.fromisoformat(data.get("last_cleanup", "2000-01-01T00:00:00"))
+        except:
+            pass
+        return datetime(2000, 1, 1)
+    
+    def save_last_cleanup(self):
+        """ذخیره زمان پاکسازی"""
+        try:
+            with open(CLEANUP_FILE, 'w', encoding='utf-8') as f:
+                json.dump({"last_cleanup": datetime.now().isoformat()}, f)
+        except:
+            pass
+    
+    def auto_cleanup(self):
+        """پاکسازی خودکار کش هر ۲۴ ساعت"""
+        now = datetime.now()
+        if now - self.last_cleanup >= timedelta(hours=24):
+            logger.info("🔄 Performing automatic cache cleanup...")
+            
+            # پاکسازی کش کانال‌های مرده
+            old_dead_count = len(self.dead_cache)
+            self.dead_cache.clear()
+            self.save_dead_cache()
+            
+            # پاکسازی کش پروکسی‌های ارسال شده
+            old_sent_count = len(self.sent_proxies)
+            self.sent_proxies.clear()
+            self.save_sent_history()
+            
+            # ریست شمارنده خطاها
+            self.failed_counter.clear()
+            
+            # ذخیره زمان پاکسازی
+            self.last_cleanup = now
+            self.save_last_cleanup()
+            
+            logger.info(f"✅ Cleaned {old_dead_count} dead channels and {old_sent_count} sent proxies")
+        else:
+            # اگر ۲۴ ساعت نگذشته، فقط کش‌های منقضی شده رو پاک کن
+            self.clean_expired_entries()
+    
+    def clean_expired_entries(self):
+        """پاک کردن آیتم‌های منقضی شده (بیشتر از ۲۴ ساعت)"""
+        now = datetime.now()
+        cleaned = False
+        
+        # پاک کردن کانال‌های منقضی
+        expired_channels = [url for url, dt in self.dead_cache.items() 
+                           if now - dt >= timedelta(hours=24)]
+        for url in expired_channels:
+            del self.dead_cache[url]
+        if expired_channels:
+            self.save_dead_cache()
+            logger.info(f"Removed {len(expired_channels)} expired channels")
+            cleaned = True
+        
+        # پاک کردن پروکسی‌های منقضی
+        expired_proxies = [h for h, dt in self.sent_proxies.items() 
+                          if now - dt >= timedelta(hours=24)]
+        for h in expired_proxies:
+            del self.sent_proxies[h]
+        if expired_proxies:
+            self.save_sent_history()
+            logger.info(f"Removed {len(expired_proxies)} expired proxies")
+            cleaned = True
+        
+        return cleaned
 
     def load_sent_history(self) -> Dict:
         if os.path.exists(SENT_HISTORY_FILE):
@@ -122,11 +201,13 @@ class MTProtoSocksExtractor:
                 self.save_dead_cache()
         return False
 
-    def updatse_dead_cache(self, url: str):
+    def update_dead_cache(self, url: str):
+        """Update dead cache for failed channels"""
         self.failed_counter[url] = self.failed_counter.get(url, 0) + 1
         if self.failed_counter[url] >= 3:
             self.dead_cache[url] = datetime.now()
             self.save_dead_cache()
+            logger.info(f"Channel {url} added to dead cache after 3 failures")
 
     def is_proxy_already_sent(self, proxy: str) -> bool:
         h = hashlib.md5(proxy.encode()).hexdigest()
@@ -200,34 +281,51 @@ class MTProtoSocksExtractor:
         try:
             r = self.session.get(url, timeout=20)
             return r.text
-        except:
+        except Exception as e:
+            logger.error(f"Failed to fetch {url}: {e}")
             return None
 
     def extract_proxies_from_channel(self, url: str) -> List[str]:
         if self.should_skip_channel(url):
+            logger.info(f"Skipping {url} (in dead cache)")
             return []
+        
         html = self.fetch_page(url)
         if not html:
             self.update_dead_cache(url)
             return []
-        soup = BeautifulSoup(html, 'html.parser')
-        blocks = soup.find_all('div', class_='tgme_widget_message_text')
-        result = []
-        button_proxies = self.extract_proxy_buttons(soup)
-        for p in button_proxies:
-            if not self.is_proxy_already_sent(p):
-                result.append(p)
-        for b in blocks:
-            text = b.get_text()
-            if self.has_ad_keywords(text):
-                continue
-            found = self.extract_from_text(text)
-            for f in found:
-                n = self.normalize_proxy(f)
-                if not self.is_proxy_already_sent(n):
-                    result.append(n)
-        self.failed_counter[url] = 0
-        return list(set(result))
+        
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            blocks = soup.find_all('div', class_='tgme_widget_message_text')
+            result = []
+            
+            # Extract from buttons
+            button_proxies = self.extract_proxy_buttons(soup)
+            for p in button_proxies:
+                if not self.is_proxy_already_sent(p):
+                    result.append(p)
+            
+            # Extract from text blocks
+            for b in blocks:
+                text = b.get_text()
+                if self.has_ad_keywords(text):
+                    continue
+                found = self.extract_from_text(text)
+                for f in found:
+                    n = self.normalize_proxy(f)
+                    if not self.is_proxy_already_sent(n):
+                        result.append(n)
+            
+            # Reset failure counter on success
+            self.failed_counter[url] = 0
+            logger.info(f"Extracted {len(result)} proxies from {url}")
+            return list(set(result))
+            
+        except Exception as e:
+            logger.error(f"Error parsing {url}: {e}")
+            self.update_dead_cache(url)
+            return []
 
     def collect_all_proxies(self) -> List[Tuple[str, str]]:
         allp = []
@@ -236,12 +334,16 @@ class MTProtoSocksExtractor:
             for p in ps:
                 t = "MTProto" if "proxy" in p else "SOCKS5"
                 allp.append((p, t))
+        
+        # Remove duplicates while preserving order
         seen = set()
         unique = []
         for p, t in allp:
             if p not in seen:
                 seen.add(p)
                 unique.append((p, t))
+        
+        logger.info(f"Collected {len(unique)} unique proxies from all channels")
         return unique
 
 
@@ -261,8 +363,12 @@ class TelegramSender:
             if reply_markup:
                 data["reply_markup"] = json.dumps(reply_markup)
             r = requests.post(self.api + "/sendMessage", data=data, timeout=30)
-            return r.status_code == 200
-        except:
+            success = r.status_code == 200
+            if not success:
+                logger.error(f"Failed to send message: {r.status_code}")
+            return success
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
             return False
 
     def create_proxy_keyboard(self, proxies: List[Tuple[str, str]]) -> dict:
@@ -305,14 +411,22 @@ class ProxyScheduler:
         self.sender = TelegramSender(BOT_TOKEN, CHANNEL_ID)
 
     async def run_once(self):
+        logger.info("Starting proxy collection...")
         proxies = self.ext.collect_all_proxies()
+        
         if proxies:
+            logger.info(f"Sending {len(proxies)} proxies in batches of {MAX_PROXIES_PER_POST}")
             for i in range(0, len(proxies), MAX_PROXIES_PER_POST):
                 batch = proxies[i:i + MAX_PROXIES_PER_POST]
                 if self.sender.send_proxies_batch(batch):
                     for p, _ in batch:
                         self.ext.mark_as_sent(p)
+                    logger.info(f"Sent batch {i//MAX_PROXIES_PER_POST + 1}/{(len(proxies)-1)//MAX_PROXIES_PER_POST + 1}")
+                else:
+                    logger.error(f"Failed to send batch {i//MAX_PROXIES_PER_POST + 1}")
                 await asyncio.sleep(1)
+        else:
+            logger.info("No new proxies found")
 
 
 def main():
